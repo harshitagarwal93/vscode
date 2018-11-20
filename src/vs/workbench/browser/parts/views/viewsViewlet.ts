@@ -85,7 +85,7 @@ export abstract class TreeViewsViewletPanel extends ViewletPanel {
 		// Make sure the current selected element is revealed
 		const selectedElement = this.tree.getSelection()[0];
 		if (selectedElement) {
-			this.tree.reveal(selectedElement, 0.5);
+			this.tree.reveal(selectedElement);
 		}
 
 		// Pass Focus to Viewer
@@ -318,7 +318,7 @@ export abstract class ViewContainerViewlet extends PanelViewlet implements IView
 		let anchor: { x: number, y: number } = { x: event.posx, y: event.posy };
 		this.contextMenuService.showContextMenu({
 			getAnchor: () => anchor,
-			getActions: () => Promise.resolve(actions)
+			getActions: () => actions
 		});
 	}
 
