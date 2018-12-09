@@ -58,40 +58,48 @@ class LeakageMonitor {
 		}
 	}
 
-	check(listenerCount: number): void {
+	check(listenerCount: number): undefined | (() => void) {
 
 		let threshold = _globalLeakWarningThreshold;
 		if (typeof this.customThreshold === 'number') {
 			threshold = this.customThreshold;
 		}
-		if (threshold > 1 && threshold < listenerCount) {
-			if (!this._stacks) {
-				this._stacks = new Map();
-			}
-			let stack = new Error().stack!.split('\n').slice(3).join('\n');
-			let count = (this._stacks.get(stack) || 0) + 1;
-			this._stacks.set(stack, count);
-			this._warnCountdown -= 1;
 
-			if (this._warnCountdown <= 0) {
-				// only warn on first exceed and then every time the limit
-				// is exceeded by 50% again
-				this._warnCountdown = threshold * .5;
-
-				// find most frequent listener and print warning
-				let topStack: string;
-				let topCount: number = 0;
-				this._stacks.forEach((count, stack) => {
-					if (!topStack || topCount < count) {
-						topStack = stack;
-						topCount = count;
-					}
-				});
-
-				console.warn(`[${this.name}] potential listener LEAK detected, having ${listenerCount} listeners already. MOST frequent listener (${topCount}):`);
-				console.warn(topStack!);
-			}
+		if (threshold <= 0 || listenerCount < threshold) {
+			return undefined;
 		}
+
+		if (!this._stacks) {
+			this._stacks = new Map();
+		}
+		let stack = new Error().stack!.split('\n').slice(3).join('\n');
+		let count = (this._stacks.get(stack) || 0);
+		this._stacks.set(stack, count + 1);
+		this._warnCountdown -= 1;
+
+		if (this._warnCountdown <= 0) {
+			// only warn on first exceed and then every time the limit
+			// is exceeded by 50% again
+			this._warnCountdown = threshold * .5;
+
+			// find most frequent listener and print warning
+			let topStack: string;
+			let topCount: number = 0;
+			this._stacks.forEach((count, stack) => {
+				if (!topStack || topCount < count) {
+					topStack = stack;
+					topCount = count;
+				}
+			});
+
+			console.warn(`[${this.name}] potential listener LEAK detected, having ${listenerCount} listeners already. MOST frequent listener (${topCount}):`);
+			console.warn(topStack!);
+		}
+
+		return () => {
+			let count = (this._stacks!.get(stack) || 0);
+			this._stacks!.set(stack, count - 1);
+		};
 	}
 }
 
@@ -121,7 +129,7 @@ export class Emitter<T> {
 	private static readonly _noop = function () { };
 
 	private readonly _options: EmitterOptions | undefined;
-	private readonly _leakageMon: LeakageMonitor;
+	private readonly _leakageMon: LeakageMonitor | undefined;
 	private _disposed: boolean = false;
 	private _event: Event<T> | undefined;
 	private _deliveryQueue: [Listener, (T | undefined)][] | undefined;
@@ -129,7 +137,9 @@ export class Emitter<T> {
 
 	constructor(options?: EmitterOptions) {
 		this._options = options;
-		this._leakageMon = new LeakageMonitor(this._options && this._options.leakWarningThreshold);
+		this._leakageMon = _globalLeakWarningThreshold > 0
+			? new LeakageMonitor(this._options && this._options.leakWarningThreshold)
+			: undefined;
 	}
 
 	/**
@@ -160,11 +170,17 @@ export class Emitter<T> {
 				}
 
 				// check and record this emitter for potential leakage
-				this._leakageMon.check(this._listeners.size);
+				let removeMonitor: (() => void) | undefined;
+				if (this._leakageMon) {
+					removeMonitor = this._leakageMon.check(this._listeners.size);
+				}
 
 				let result: IDisposable;
 				result = {
 					dispose: () => {
+						if (removeMonitor) {
+							removeMonitor();
+						}
 						result.dispose = Emitter._noop;
 						if (!this._disposed) {
 							remove();
@@ -227,7 +243,9 @@ export class Emitter<T> {
 		if (this._deliveryQueue) {
 			this._deliveryQueue.length = 0;
 		}
-		this._leakageMon.dispose();
+		if (this._leakageMon) {
+			this._leakageMon.dispose();
+		}
 		this._disposed = true;
 	}
 }
@@ -392,9 +410,9 @@ export function anyEvent<T>(...events: Event<T>[]): Event<T> {
 	return (listener, thisArgs = null, disposables?) => combinedDisposable(events.map(event => event(e => listener.call(thisArgs, e), null, disposables)));
 }
 
-export function debounceEvent<T>(event: Event<T>, merger: (last: T, event: T) => T, delay?: number, leading?: boolean): Event<T>;
-export function debounceEvent<I, O>(event: Event<I>, merger: (last: O | undefined, event: I) => O, delay?: number, leading?: boolean): Event<O>;
-export function debounceEvent<I, O>(event: Event<I>, merger: (last: O | undefined, event: I) => O, delay: number = 100, leading = false): Event<O> {
+export function debounceEvent<T>(event: Event<T>, merger: (last: T, event: T) => T, delay?: number, leading?: boolean, leakWarningThreshold?: number): Event<T>;
+export function debounceEvent<I, O>(event: Event<I>, merger: (last: O | undefined, event: I) => O, delay?: number, leading?: boolean, leakWarningThreshold?: number): Event<O>;
+export function debounceEvent<I, O>(event: Event<I>, merger: (last: O | undefined, event: I) => O, delay: number = 100, leading = false, leakWarningThreshold?: number): Event<O> {
 
 	let subscription: IDisposable;
 	let output: O | undefined = undefined;
@@ -402,6 +420,7 @@ export function debounceEvent<I, O>(event: Event<I>, merger: (last: O | undefine
 	let numDebouncedCalls = 0;
 
 	const emitter = new Emitter<O>({
+		leakWarningThreshold,
 		onFirstListenerAdd() {
 			subscription = event(cur => {
 				numDebouncedCalls++;
@@ -433,7 +452,7 @@ export function debounceEvent<I, O>(event: Event<I>, merger: (last: O | undefine
 }
 
 /**
- * The EventDelayer is useful in situations in which you want
+ * The EventBufferer is useful in situations in which you want
  * to delay firing your events during some code.
  * You can wrap that code and be sure that the event will not
  * be fired during that wrap.

@@ -10,8 +10,8 @@ import { app } from 'electron';
 import { URI } from 'vs/base/common/uri';
 import { IDisposable, dispose } from 'vs/base/common/lifecycle';
 import { IWindowsMainService } from 'vs/platform/windows/electron-main/windows';
-import { ReadyState } from 'vs/platform/windows/common/windows';
 import { isWindows } from 'vs/base/common/platform';
+import { coalesce } from 'vs/base/common/arrays';
 
 function uriFromRawUrl(url: string): URI | null {
 	try {
@@ -36,7 +36,7 @@ export class ElectronURLListener {
 			...globalBuffer
 		];
 
-		const buffer = rawBuffer.map(uriFromRawUrl).filter(uri => !!uri);
+		const buffer = coalesce(rawBuffer.map(uriFromRawUrl));
 		const flush = () => buffer.forEach(uri => {
 			if (uri) {
 				urlService.open(uri);
@@ -59,7 +59,7 @@ export class ElectronURLListener {
 		onOpenUrl(this.urlService.open, this.urlService, this.disposables);
 
 		const isWindowReady = windowsService.getWindows()
-			.filter(w => w.readyState === ReadyState.READY)
+			.filter(w => w.isReady)
 			.length > 0;
 
 		if (isWindowReady) {
